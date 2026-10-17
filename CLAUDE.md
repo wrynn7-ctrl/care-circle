@@ -27,6 +27,15 @@ You are implementing one phase at a time from `docs/02-build-plan.md`. Read the 
 - Accessibility: every interactive element has an accessible label; default font scale is respected (many users are 50–70 years old); minimum touch target 44pt.
 - Copy tone: plain, warm, short. "Mom" is never hard-coded; use the recipient's chosen display name.
 
+## Screenshots
+
+Every change to UI code (`src/app/**`, `src/features/**/screens/**`, `src/features/**/components/**`, `src/ui/**`) ships with screenshots. A hook in `.claude/settings.json` reminds you after each UI edit; the rule holds whether or not the reminder fires.
+
+- Run `npm run screenshots` (set up in Phase 0; see build plan). It renders every route listed in `scripts/screenshots/screens.json` against the seeded local Supabase at two phone sizes and writes PNGs to `docs/screenshots/<route>.<size>.png`.
+- Commit the regenerated PNGs in the same commit as the UI change. For a changed screen, the diff of the PNG is the before/after; name the affected screens in the commit message. In a PR, fill the Screenshots section of the template with the before and after images.
+- When a change adds a screen, add its route (and the seed state it needs) to `screens.json` in the same commit.
+- Screenshots come from Expo web rendering at phone viewports and are a review aid, not a pixel-exact native capture. Phase 1E adds emulator captures for the internal release; where the two differ, the emulator wins.
+
 ## Definition of done for a phase
 
 1. All acceptance criteria in the phase are demonstrably met.
@@ -35,3 +44,4 @@ You are implementing one phase at a time from `docs/02-build-plan.md`. Read the 
 4. Migrations apply cleanly to a fresh local Supabase (`supabase db reset`).
 5. `docs/decisions.md` updated if any decision was made.
 6. Commit messages explain why, not just what.
+7. Any UI change has regenerated screenshots committed under `docs/screenshots/` (see Screenshots above).

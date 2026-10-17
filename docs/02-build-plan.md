@@ -19,15 +19,17 @@ How to hand a phase to Sonnet: paste the phase text, point at the architecture s
 - `src/lib/supabase.ts`, `queryClient.ts` with MMKV persistence (encryption key in secure store), `sentry.ts` with scrubber, `i18n/en.json`, `src/ui/` base components and theme (large-text safe).
 - Tooling: ESLint, Prettier, Jest + RNTL, pgTAP harness (`supabase test db`), GitHub Actions running typecheck, lint, Jest, and `supabase db reset && supabase test db` on a Postgres service.
 - Type generation script `npm run db:types`.
+- **Screenshot tooling** (`npm run screenshots`): `scripts/screenshots/run.ts` starts Expo web (`expo start --web` or `expo export --platform web` served statically) against the local Supabase stack seeded by `supabase/seed.sql`, signs in as the seeded host, then uses Playwright (Chromium) to visit every route in `scripts/screenshots/screens.json` at 390×844 and 412×915 with device scale factor 2, and writes `docs/screenshots/<route-slug>.<width>.png`. Each entry in `screens.json` names the route, the seeded user to sign in as, and any setup action (e.g. open a specific task). The script fails if a route listed is missing or renders an error boundary. A `screenshots` CI job runs it on every PR and uploads the PNGs as an artifact; the PR template has a Screenshots section. Expo web rendering differs from native in small ways; this is a change-review aid, not a visual regression gate.
 
 **Files**
-`app.json`, `eas.json`, `package.json`, `tsconfig.json`, `.github/workflows/ci.yml`, `src/app/(auth)/sign-in.tsx`, `src/app/(auth)/verify.tsx`, `src/app/(app)/_layout.tsx`, `src/lib/*.ts`, `src/ui/*`, `supabase/config.toml`, `supabase/migrations/0001–0003`, `supabase/tests/0001_profiles.sql`, `supabase/seed.sql`.
+`app.json`, `eas.json`, `package.json`, `tsconfig.json`, `.github/workflows/ci.yml`, `.github/pull_request_template.md`, `scripts/screenshots/run.ts`, `scripts/screenshots/screens.json`, `docs/screenshots/`, `src/app/(auth)/sign-in.tsx`, `src/app/(auth)/verify.tsx`, `src/app/(app)/_layout.tsx`, `src/lib/*.ts`, `src/ui/*`, `supabase/config.toml`, `supabase/migrations/0001–0003`, `supabase/tests/0001_profiles.sql`, `supabase/seed.sql`.
 
 **Acceptance criteria**
 - A fresh clone with documented env vars runs on an Android emulator, signs in with an email code, and shows an empty home screen.
 - `supabase db reset` applies migrations; `profiles` row is created on sign-up.
 - CI is green on the main branch.
 - Sentry receives a test crash with no email or PII in the event (verify by reading the event).
+- `npm run screenshots` produces PNGs for the sign-in and empty-home routes at both sizes, committed under `docs/screenshots/`.
 
 **Tests**
 - pgTAP: profiles trigger creates a row; RLS enabled on every table in `public` (generic test that fails if any table lacks RLS).
@@ -115,6 +117,7 @@ The MVP Michael's family can use. Sub-phases are stopping points.
 - Offline: `onlineManager` + mutation persistence; stale banner; queued-writes indicator; replay test.
 - Biometric app lock (§3) with blurred app switcher.
 - Settings: profile name, notifications toggle, app lock toggle, sign out; **Circle settings (host only):** every module toggle from §4.3, recipient participation, who can invite, linked circles. Turning a module off hides its tab and its home-screen items; data is untouched.
+- Device screenshots: a Maestro flow (`.maestro/screenshots.yaml`) run against the Android emulator captures the same routes as `screens.json` into `docs/screenshots/android/`; run before each internal release. Where web and emulator captures differ, the emulator is the truth.
 - Android internal build via EAS; onboarding doc `docs/family-beta.md` for Michael's family (how to install, what to expect, how to report a problem).
 
 **Acceptance criteria**

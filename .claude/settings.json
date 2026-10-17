@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/ui-screenshot-reminder.sh",
+            "timeout": 10,
+            "statusMessage": "Checking whether UI changed"
+          }
+        ]
+      }
+    ]
+  }
+}

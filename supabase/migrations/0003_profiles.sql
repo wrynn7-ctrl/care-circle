@@ -8,7 +8,6 @@ create table if not exists public.profiles (
 );
 comment on table public.profiles is 'One row per auth user. display_name is what other circle members see.';
 
-drop trigger if exists set_updated_at on public.profiles;
 create trigger set_updated_at before update on public.profiles
   for each row execute function app.set_updated_at();
 
@@ -33,7 +32,6 @@ begin
   return new;
 end $$;
 
-drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users
   for each row execute function app.handle_new_user();
 
@@ -41,14 +39,11 @@ alter table public.profiles enable row level security;
 alter table public.push_tokens enable row level security;
 
 -- Phase 0: a user sees and edits only their own profile. Phase 1A widens select to people who share a circle.
-drop policy if exists profiles_select on public.profiles;
 create policy profiles_select on public.profiles for select to authenticated
   using (id = (select auth.uid()));
-drop policy if exists profiles_update on public.profiles;
 create policy profiles_update on public.profiles for update to authenticated
   using (id = (select auth.uid())) with check (id = (select auth.uid()));
 
-drop policy if exists push_tokens_all on public.push_tokens;
 create policy push_tokens_all on public.push_tokens for all to authenticated
   using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
 

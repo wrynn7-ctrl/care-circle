@@ -36,7 +36,7 @@ exception when duplicate_object then null; end $$;
 -- Generic updated_at maintenance. Attach with:
 --   create trigger set_updated_at before update on <table> for each row execute function app.set_updated_at();
 create or replace function app.set_updated_at()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   new.updated_at = now();
   return new;

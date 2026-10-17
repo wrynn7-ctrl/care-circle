@@ -7,7 +7,7 @@ The code is written phase by phase from the planning documents below. **Phase 0 
 ## Running it
 
 ```bash
-cp .env.example .env.local        # fill in Supabase URL + publishable key (local stack or your project)
+cp .env.example .env.local        # hosted project: https://xfyqjbzslciccjsqnmqg.supabase.co + its publishable key (Supabase dashboard → API keys)
 npm install
 npx supabase start                 # local Postgres/Auth/Storage (needs Docker); codes appear at http://localhost:54324
 npm start                          # then press a for Android (development build) or w for web

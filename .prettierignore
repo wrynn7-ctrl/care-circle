@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-screens
+.expo
+coverage
+supabase/.temp
+docs/screenshots
+*.sql
+package-lock.json
+*.md

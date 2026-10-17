@@ -1,0 +1,26 @@
+{
+  "sizes": [
+    { "name": "390", "width": 390, "height": 844 },
+    { "name": "412", "width": 412, "height": 915 }
+  ],
+  "screens": [
+    {
+      "slug": "sign-in",
+      "path": "/sign-in",
+      "auth": "none",
+      "waitFor": "[data-testid=\"screen-sign-in\"]"
+    },
+    {
+      "slug": "verify",
+      "path": "/verify?email=dana%40example.com",
+      "auth": "none",
+      "waitFor": "[data-testid=\"screen-verify\"]"
+    },
+    {
+      "slug": "home-empty",
+      "path": "/",
+      "auth": "host",
+      "waitFor": "[data-testid=\"screen-home\"]"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Questions for Michael (and the defaults the plan assumes)
 
+**Answered by Michael on 2026-10-17.** The resulting changes to the plan are recorded in `docs/decisions.md` and folded into the architecture, schema and build plan.
+
 The rest of this package is written against the **default** under each question. If you answer differently, the affected sections are named so they can be revised before Sonnet starts the phase that depends on them.
 
 ---

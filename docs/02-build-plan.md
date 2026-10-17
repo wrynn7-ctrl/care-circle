@@ -42,14 +42,18 @@ The MVP Michael's family can use. Sub-phases are stopping points.
 ### 1A. Circles, roles, invites (1–2 sessions)
 
 **Scope**
-- Migrations: `circles`, `circle_settings`, `circle_members`, `invites`, `recipient_profile`, `contacts`, helper functions, policies from the draft, `after insert on circles` trigger (owner membership, settings, recipient profile), `updated_at` trigger utility.
+- Migrations: `households`, `circles`, `circle_settings` (with all module toggles from architecture §4.3), `circle_members`, `invites`, `recipient_profile`, `contacts`, helper functions, policies from the draft, `app.create_circle()` and `app.link_circles()` RPCs, `updated_at` trigger utility.
 - Edge Function `accept-invite`: takes the raw token, hashes, validates expiry and status, inserts membership for the caller, marks accepted. Invites are sent as a share link (system share sheet with a prefilled message) rather than email to avoid an email vendor at MVP; the link deep-links into the app (Expo Router + `scheme`).
-- Screens: create circle (name, recipient display name, **consent basis** step, §13), circle home, members list, invite member (role picker with plain-language descriptions per role), accept-invite route, switch circle, leave circle, transfer ownership (owner only), remove member (owner only).
+- **Setup wizard** (architecture §13), one question per screen, every answer editable later in Settings: recipient's display name → consent basis → "Will {Name} use the app?" (with the plain description of recipient access and a note that participation can be turned off any time) → "What do you want to use Care Circle for?" (module toggles, basics pre-selected) → "Are you caring for more than one person?" (creates a linked second circle in the same household and offers to invite the same people to it) → invite people.
+- Screens: circle home (tab bar reflects toggles), members list, invite member (role picker with plain-language descriptions; the owner is called **Host** in all copy; `full` members see the invite button only when `full_members_can_invite` is on), accept-invite route, circle switcher that groups linked circles, leave circle, transfer host (owner only), remove member (owner only), link an existing circle (owner of both).
 - Role-based UI gating utility `src/lib/permissions.ts` mirroring the matrix (tests compare it to a fixture of the matrix).
 
 **Acceptance criteria**
 - Owner creates a circle, generates an invite link for `full`, a second account accepts it and sees the circle.
 - A `friend` invite accepted by a third account sees nothing but an empty updates placeholder.
+- Wizard answered "No" to recipient participation: no recipient invite option is shown; turning it on later in Settings shows it; turning it off deactivates an existing recipient membership (pgTAP: deactivated recipient gets zero rows).
+- Wizard creates a linked second circle: both appear grouped in the switcher; a member of only one circle sees only that one (pgTAP: no cross-circle rows via the household).
+- A `full` member cannot create an invite unless `full_members_can_invite` is on (pgTAP both ways).
 - A user who is not a member and knows a circle id gets zero rows from every table (pgTAP).
 - Owner cannot be removed; ownership transfer swaps roles atomically (SQL function).
 
@@ -110,7 +114,7 @@ The MVP Michael's family can use. Sub-phases are stopping points.
 - Realtime subscriptions per §6 in `src/lib/realtime.ts`, wired to query invalidation.
 - Offline: `onlineManager` + mutation persistence; stale banner; queued-writes indicator; replay test.
 - Biometric app lock (§3) with blurred app switcher.
-- Settings: profile name, notifications toggle, app lock toggle, sign out.
+- Settings: profile name, notifications toggle, app lock toggle, sign out; **Circle settings (host only):** every module toggle from §4.3, recipient participation, who can invite, linked circles. Turning a module off hides its tab and its home-screen items; data is untouched.
 - Android internal build via EAS; onboarding doc `docs/family-beta.md` for Michael's family (how to install, what to expect, how to report a problem).
 
 **Acceptance criteria**
@@ -128,6 +132,7 @@ The MVP Michael's family can use. Sub-phases are stopping points.
 
 **Scope**
 - Migrations: `updates`, `fairness_summary` view (`security_invoker`), `show_fairness` setting plumbing.
+- Home "Today" list spans linked circles in the same household (next appointments and due tasks across both, each row labelled with the circle name).
 - Feed screen: updates (team) interleaved with activity_log items ("Dana completed 'Call insurance'"); compose update with audience picker (family_friends gated by Plus; in trial it's available); friends see only their audience and author display names.
 - Fairness screen per §9 (30/90-day toggle; alphabetical; equal-weight rows; explanatory copy; owner hide switch).
 - Push on new team update (generic: "New update in {circle name}").
@@ -146,21 +151,23 @@ The MVP Michael's family can use. Sub-phases are stopping points.
 ## Phase 3: Voice memo visit notes with AI summary (3 sessions)
 
 **Scope**
-- Migration: `visit_notes`, bucket `visit-audio` + storage policies, `audio_retention_days` cron.
+- Migration: `visit_notes`, bucket `visit-audio` + storage policies. The bucket is **transit storage**: the Edge Function deletes the object when the note reaches `draft` unless `circle_settings.keep_visit_audio` is on (architecture §10.6).
 - Recording UI (§10.1): from appointment detail or standalone; pause/resume; max 20 minutes; local save; upload with retry; status chips.
 - Edge Function `visit-note-process` (§10.3–10.5): JWT-scoped membership check, service-role download, STT vendor adapter `_shared/stt.ts`, Anthropic call with `messages.parse` + Zod `VisitSummarySchema`, `fallbacks: "default"`, status transitions, generic push, structured error to `error` column. Secrets: `ANTHROPIC_API_KEY`, `STT_API_KEY`.
 - Review screen: editable summary sections; "Create tasks" multi-select from follow-ups; "Review medication changes" opens med editor pre-filled, one at a time, with the suggestion shown as a quote; **Post to the team**. Posted note appears in feed and under the appointment.
-- Audio: "Listen to original", delete audio (keeps transcript), transcript view.
+- Audio: per-device preference "Keep my voice memos on this phone" (off by default) stores an encrypted local copy playable only by the author; with `keep_visit_audio` on, "Listen to original" works for the team from the server. Delete audio (local and/or server) keeps the transcript. Transcript view; delete transcript (author or host).
 - Plus gating: invoking the function requires `app.circle_is_plus` (checked in the function); UI shows paywall otherwise.
 
 **Acceptance criteria**
 - A 5-minute memo produces a draft within 2 minutes; nothing is visible to the team until posted.
 - Payload sent to Anthropic contains only the fields listed in §10.2 (Deno test asserts on a captured request).
 - A failed vendor call leaves status `failed` with a retry button; retry works.
-- Audio deleted → file gone from Storage (verified), transcript remains.
+- Default settings: after a note reaches `draft`, the Storage object is gone (verified) and no local copy exists; transcript and summary remain.
+- With the local-copy preference on, the author can play the memo offline and no other member can fetch it.
+- With `keep_visit_audio` on, the object remains and `viewer` can play it; turning the toggle off later does not delete existing audio (host deletes explicitly).
 
 **Tests**
-- Deno: function with mocked STT and Anthropic clients: happy path, STT failure, Anthropic refusal path, non-member caller rejected, non-Plus circle rejected, payload minimization assertion, Zod schema rejects malformed output.
+- Deno: function with mocked STT and Anthropic clients: happy path, STT failure, Anthropic refusal path, non-member caller rejected, non-Plus circle rejected, payload minimization assertion, Zod schema rejects malformed output, audio object deleted at `draft` unless `keep_visit_audio`.
 - pgTAP: visit_notes policies (recipient sees only posted), storage policies.
 - Jest: recorder state machine; review screen edits persist to `summary_edited`; med suggestion never writes without confirmation.
 

@@ -79,11 +79,11 @@ Roles are per circle. A person can hold different roles in different circles.
 
 | Role | Who | Summary |
 |---|---|---|
-| `owner` | The sibling who created the circle (transferable) | Everything, plus billing, member management, delete circle. Exactly one per circle. |
-| `full` | Siblings, spouse | Read/write everything except billing and deleting the circle. Can invite `viewer`, `aide`, `friend`, `recipient`. |
+| `owner` | The sibling who created the circle (transferable). Shown in the app as **Host**. | Everything, plus billing, member management, delete circle. Exactly one per circle. The host is the purchaser and, by default, the only person who adds people. |
+| `full` | Siblings, spouse | Read/write everything except billing and deleting the circle. Can invite `viewer`, `aide`, `friend` and `recipient` only if the host turns on `full_members_can_invite`. |
 | `viewer` | A relative who wants to follow along | Read everything on the team side. No writes except posting to the team feed. |
 | `aide` | Paid caregiver, home health aide | Appointments and tasks only. Can mark tasks assigned to them done, add a comment to a task, see appointment logistics (time, place, who's driving). No meds, documents, expenses, notes, fairness. |
-| `recipient` | The parent | Their own profile, meds, appointments, contacts, documents, emergency sheet, both feeds. Can post updates. No tasks, fairness or expenses unless owner enables (`circle_settings.recipient_sees_tasks`, `recipient_sees_expenses`). |
+| `recipient` | The parent | Exists only when the host answered yes to "Will {Name} use the app?" at setup (or later in Settings). Their own profile, meds, appointments, contacts, documents, emergency sheet, both feeds. Can post updates. No tasks, fairness or expenses unless the host enables (`circle_settings.recipient_sees_tasks`, `recipient_sees_expenses`). Turning participation off deactivates their membership immediately. |
 | `friend` | Extended family and friends | Only updates with audience `family_friends`, the recipient's display name, and nothing else. Cannot see member list beyond authors' display names. |
 
 ### 4.1 Permission matrix
@@ -93,7 +93,7 @@ R = read, W = create/update, D = delete, own = only rows where they are author/a
 | Entity | owner | full | viewer | aide | recipient | friend |
 |---|---|---|---|---|---|---|
 | circle settings, billing | RWD | R | R | – | – | – |
-| members, invites | RWD | RW (not owner/full invites) | R | – | R (names only) | – |
+| members, invites | RWD | R (W for non-owner/full roles if `full_members_can_invite`) | R | – | R (names only) | – |
 | recipient profile | RW | RW | R | – | R | – |
 | medications | RWD | RWD | R | – | R | – |
 | appointments | RWD | RWD | R | R | R | – |
@@ -112,6 +112,25 @@ R = read, W = create/update, D = delete, own = only rows where they are author/a
 
 Everything in the matrix is a Postgres RLS policy. The app also hides UI the role can't use, but the database is the authority. Policies call two `SECURITY DEFINER` helper functions (`app.member_role(circle_id)`, `app.is_member(circle_id)`) that read `circle_members` for `auth.uid()`, declared `STABLE` and using `(select auth.uid())` so Postgres evaluates them once per query. Storage policies parse the first path segment as `circle_id` and call the same helpers. Full draft in `schema-draft.sql`.
 
+### 4.3 Module toggles (simple by default, comprehensive on request)
+
+Michael's direction: some families want only basic coordination, others want everything, so as much as possible is switchable. Every feature module is a boolean on `circle_settings`, set in the setup wizard and changeable by the host in Settings:
+
+| Toggle | Default | Controls |
+|---|---|---|
+| `enable_medications` | on | Medications tab, refill reminders, med section of the emergency sheet |
+| `enable_updates` | on | Updates feed (activity items still appear on the home screen) |
+| `show_fairness` | on | Fairness view |
+| `enable_visit_notes` | on | Voice memo button and visit notes |
+| `enable_documents` | on | Document vault (emergency sheet still works without it) |
+| `enable_expenses` | off | Expenses and balances |
+| `enable_friends_audience` | off | Family-and-friends audience and `friend` role |
+| `recipient_participates` | asked at setup | Whether a `recipient` login exists |
+| `full_members_can_invite` | off | Whether `full` members may invite non-owner roles |
+| `keep_visit_audio` | off | Whether original audio stays on the server for the team (§10.6) |
+
+Calendar, tasks and the circle itself are always on. **Toggles hide UI and stop new writes; they are not security.** RLS stays the authority regardless of toggles, and existing data is never deleted by turning a module off (it reappears when the module is turned back on). The app reads toggles from `circle_settings` and renders the tab bar accordingly.
+
 **Tests:** every policy gets a pgTAP test that sets `request.jwt.claims` to a user of each role and asserts allowed/denied for select, insert, update, delete, including a user from a **different circle** and an anonymous user. This is the single most important test suite in the project.
 
 ## 5. Data model
@@ -119,7 +138,7 @@ Everything in the matrix is a Postgres RLS policy. The app also hides UI the rol
 Full DDL in `schema-draft.sql`. Summary of entities:
 
 - `profiles` (1:1 with auth user), `push_tokens`
-- `circles`, `circle_settings`, `circle_members`, `invites`
+- `households` (optional grouping that links circles, e.g. Mom's and Dad's; see §5.1), `circles`, `circle_settings`, `circle_members`, `invites`
 - `recipient_profile` (1:1 with circle: name, DOB, conditions, allergies, blood type, insurance, pharmacy, proxy contact, notes)
 - `contacts` (physicians, pharmacy, facility, insurance, other)
 - `medications` (+ `medication_history` via trigger)
@@ -134,7 +153,15 @@ Full DDL in `schema-draft.sql`. Summary of entities:
 
 Conventions: `uuid` primary keys (`gen_random_uuid()`), `created_at/updated_at timestamptz` with an `updated_at` trigger, soft delete (`deleted_at`) only on `medications`, `documents`, `visit_notes` (things people regret deleting); hard delete elsewhere. Money in integer cents. All timestamps UTC; the app renders in the device zone, and appointments store `tz` text so "9:00 at the clinic" stays 9:00 when a sibling in another state views it.
 
-**One thing to confirm before Phase 1 migrations freeze:** one recipient per circle (assumed). Supporting several recipients later would mean adding `recipient_id` to meds, appointments, documents and visit notes.
+Confirmed by Michael: one recipient per circle. Families caring for two parents use two **linked** circles.
+
+### 5.1 Linked circles (households)
+
+A `household` groups circles that belong to the same family. Linking is offered in the setup wizard ("Are you caring for more than one person?") and in Settings. Rules:
+
+- Membership and RLS stay **per circle**. Linking never grants access; it only lets the app show linked circles together (quick switcher, a combined "Today" list across circles in Phase 2) and offers to invite the same people to the second circle with the same roles.
+- At Phase 1 only the host of both circles can link them (the wizard creates the second circle directly in the household). Linking two circles owned by different people (invite-and-accept between hosts) is a later feature, as is Michael's "combine circles later" idea, which would merge two circles' data; the household table is the hook for both.
+- A household is visible to anyone who is a member of at least one circle in it, but only the circles they belong to are listed.
 
 ## 6. Realtime
 
@@ -173,7 +200,7 @@ Computed from `activity_log` and `expenses` by a Postgres view `fairness_summary
    b. sets status `summarizing`, calls Claude with the transcript and minimal context; stores `summary` JSON; sets status `draft`;
    c. sends a generic push to the author: "Your visit summary is ready to review."
 4. The author reviews and edits the summary in the app, chooses which follow-ups become tasks (each pre-filled, assignee blank) and which medication changes to apply (opens the med editor pre-filled; nothing is applied silently), then taps **Post to the team**. Status `posted`.
-5. The original audio stays attached ("Listen to original") until the author or an owner deletes it. A circle setting `audio_retention_days` (default: keep) can auto-delete audio while keeping the transcript and summary.
+5. **Audio is not kept on the server by default.** Once the summary reaches `draft`, the Edge Function deletes the object from the `visit-audio` bucket; the bucket is transit storage, not an archive. The transcript stays attached to the note (it's the team's way to check the summary) and can be deleted by the author or host. Two opt-in toggles change this: a per-device preference "Keep my voice memos on this phone" (off by default) stores an encrypted local copy that only the author can play back, and the circle toggle `keep_visit_audio` (off by default, host only) keeps the original on the server so the whole team can listen. See §10.6.
 
 ### 10.2 Minimum necessary payload to AI
 
@@ -206,19 +233,24 @@ Abstracted behind `supabase/functions/_shared/stt.ts` with one implementation. C
 
 Supabase Edge Functions have a short CPU-time budget per request but a long wall-clock allowance; waiting on vendor HTTP calls is not CPU time, so this pipeline fits. The function streams the audio file to the vendor rather than holding it in memory where possible, and never processes audio itself. If a vendor needs a callback URL, add a second function `visit-note-callback`.
 
+### 10.6 Data locality principle
+
+Michael's direction: data should stay local to the person as much as possible. Applied here: anything only one person needs (their voice memo audio, their drafts before posting, their device preferences) lives on that person's device, encrypted, and is uploaded only transiently when a server-side step needs it. Anything the team needs to share (the posted summary, the transcript used to check it, meds, appointments, tasks) lives on the server under RLS. When a feature can work either way, default to local and offer the server as a toggle.
+
 ## 11. Emergency sheet
 
 A read-only screen assembled from `recipient_profile`, active `medications`, physician and pharmacy `contacts`, insurance `documents` (card images), and the proxy contact. Rendered to HTML → PDF with `expo-print`, shared with `expo-sharing`. Cached encrypted on device after every change (§7) so it opens instantly offline. Deliberate exception to the app lock: a long-press on the app-lock screen's "Emergency sheet" button opens the sheet after biometric **or** device PIN, so a sibling can hand their phone to a nurse in two taps. On-screen view is free; PDF export is paid (§12). The sheet header carries: "Prepared by family on {date}. Verify with the patient's physician."
 
 ## 12. Subscription and feature gating
 
-- RevenueCat with `react-native-purchases`. App user ID = Supabase user ID. Products: `plus_monthly`, `plus_annual`, entitlement `plus`.
+- RevenueCat with `react-native-purchases`. App user ID = Supabase user ID. Products: `plus_monthly`, `plus_annual`, entitlement `plus`. One purchaser per circle: the **host** (owner role), who is also the person who adds members by default.
 - A subscription belongs to the **purchaser**, but entitles the **circle**: `circle_subscriptions(circle_id, purchaser_user_id, entitlement, status, current_period_end, source)` updated by the Edge Function `revenuecat-webhook` (verifies RevenueCat's webhook auth header). Only the owner can purchase for a circle; if the owner transfers ownership, the subscription stays with the purchaser until it lapses, then the new owner can buy.
 - Trial: `circles.trial_ends_at = created_at + 30 days`. A SQL function `app.circle_is_plus(circle_id)` returns true if in trial or an active subscription exists.
 - Gating: **writes** to paid tables (`documents`, `expenses`, `expense_splits`, `settlements`, posting with audience `family_friends`, invoking `visit-note-process`) require `app.circle_is_plus()` in the RLS insert/update policy or at the top of the function. **Reads and export are never gated.** The app shows a paywall when a gated action is attempted, and a banner during the last 5 trial days.
 
 ## 13. Privacy by design decisions
 
+- **Setup wizard.** Creating a circle is a short, one-question-per-screen wizard run by the host: (1) what the family calls the person receiving care; (2) consent basis (below); (3) "Will {Name} use the app?" with a plain description of exactly what a recipient login can see and the note that this can be changed later, and that some people find it stressful to participate; (4) "What do you want to use Care Circle for?" with the module toggles from §4.3, basics pre-selected; (5) "Are you caring for more than one person?" which creates a linked second circle (§5.1); (6) invite people. Every answer is editable later in Settings.
 - **Consent at setup.** Creating a circle requires ticking one of: "{Name} has agreed to the family keeping this record" or "I hold health care proxy / power of attorney for {Name}". Stored as `circles.consent_basis` with timestamp and user. Inviting the recipient shows them what the family can see.
 - **Data minimization.** No field is required beyond name. No DOB is required until the emergency sheet is used. No location, contacts-list or photo-library-wide permissions; receipts and document photos use the single-image picker.
 - **Export.** Settings → Export my circle: Edge Function `export-data` builds a ZIP (JSON per table + files) into a private bucket path and returns a signed URL valid 24 hours; owner and `full` members can run it.

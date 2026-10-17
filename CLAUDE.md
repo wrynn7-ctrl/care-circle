@@ -11,6 +11,9 @@ You are implementing one phase at a time from `docs/02-build-plan.md`. Read the 
 - **No dosing advice, interaction checks, or clinical recommendations** anywhere in UI copy or code. The medications screen carries the record-keeping disclaimer from the architecture doc.
 - **Fairness view is visibility, not a scoreboard.** No ranks, no "behind", no red/green by person, alphabetical order.
 - **Minimum necessary to AI vendors.** Send only what the Edge Function spec lists. Never send the document vault, expenses, or the full recipient profile.
+- **Simple by default, comprehensive on request.** Every feature module is a boolean on `circle_settings` (architecture §4.3). A module that is off is hidden from navigation and blocks new writes in the UI, but RLS is the only security and existing data is never deleted by a toggle.
+- **Data stays local to the person where it can.** Artifacts only one person needs (voice memo audio, unposted drafts, device preferences) live encrypted on their device; the server holds what the team shares. Voice audio on the server is transit-only unless `keep_visit_audio` is on.
+- **The owner role is called "Host" in all user-facing copy.** The enum value stays `owner`.
 - **Secrets** live in Supabase Edge Function secrets or `.env.local` (gitignored). Never in source, never in the app bundle except the Supabase anon/publishable key.
 
 ## Stack and conventions

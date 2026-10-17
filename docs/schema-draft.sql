@@ -3,7 +3,8 @@
 -- RLS enabled on every table, policies via app.* helper functions.
 -- Comments marked TODO(phase N) are deferred to that phase.
 -- Verified: applies cleanly on PostgreSQL 16 with stubbed auth.users/auth.uid(); smoke test confirmed cross-circle
--- isolation and the aide restrictions (see 02-build-plan Phase 1A tests for the full matrix to automate).
+-- isolation, the aide restrictions, household linking (no cross-circle access), the full_members_can_invite toggle,
+-- and that every public table has at least one policy (see 02-build-plan Phase 1A tests for the full matrix to automate).
 
 create schema if not exists app;
 
@@ -15,6 +16,7 @@ create type app.contact_kind as enum ('physician','pharmacy','facility','insuran
 create type app.task_status as enum ('open','done');
 create type app.task_effort as enum ('quick','hour','half_day','full_day');
 create type app.visit_note_status as enum ('recording','uploaded','transcribing','summarizing','draft','posted','failed');
+-- visit_notes.audio_path is cleared and the object deleted when status reaches 'draft' unless circle_settings.keep_visit_audio.
 create type app.update_audience as enum ('team','family_friends');
 create type app.document_kind as enum ('poa','health_care_proxy','advance_directive','insurance_card','id_card','other');
 create type app.subscription_status as enum ('trial','active','grace','expired','none');
@@ -36,9 +38,20 @@ create table public.push_tokens (
   created_at timestamptz not null default now()
 );
 
+-- ---------------------------------------------------------------- households (linked circles)
+-- A household groups circles for the same family (Mom's and Dad's). It grants NO access by itself;
+-- membership and every policy stay per circle. See architecture 5.1.
+create table public.households (
+  id uuid primary key default gen_random_uuid(),
+  name text not null default '',
+  created_by uuid not null references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
 -- ---------------------------------------------------------------- circles
 create table public.circles (
   id uuid primary key default gen_random_uuid(),
+  household_id uuid references public.households(id) on delete set null,
   name text not null,                              -- "Mom's care team"
   created_by uuid not null references public.profiles(id),
   consent_basis text not null check (consent_basis in ('recipient_agreed','proxy_or_poa')),
@@ -49,12 +62,21 @@ create table public.circles (
   updated_at timestamptz not null default now()
 );
 
+-- Module toggles (architecture 4.3). Toggles hide UI and stop new writes; they are never security.
 create table public.circle_settings (
   circle_id uuid primary key references public.circles(id) on delete cascade,
+  enable_medications boolean not null default true,
+  enable_updates boolean not null default true,
   show_fairness boolean not null default true,
+  enable_visit_notes boolean not null default true,
+  enable_documents boolean not null default true,
+  enable_expenses boolean not null default false,
+  enable_friends_audience boolean not null default false,
+  recipient_participates boolean not null default false,   -- asked in the setup wizard
   recipient_sees_tasks boolean not null default false,
   recipient_sees_expenses boolean not null default false,
-  audio_retention_days integer,                    -- null = keep until deleted
+  full_members_can_invite boolean not null default false,  -- host adds people by default
+  keep_visit_audio boolean not null default false,         -- audio is transit-only unless on (architecture 10.6)
   updated_at timestamptz not null default now()
 );
 
@@ -396,20 +418,57 @@ create policy circles_delete on public.circles for delete to authenticated using
 -- RPC that inserts the circle, the owner membership, settings and the recipient profile in one transaction.
 -- (A plain insert + after-trigger fails under RLS: INSERT ... RETURNING applies the select policy before the
 -- owner membership exists.)
-create or replace function app.create_circle(p_name text, p_recipient_display_name text, p_consent_basis text)
+-- p_household: pass the household of a circle the caller already hosts to create a linked circle (wizard step 5).
+create or replace function app.create_circle(p_name text, p_recipient_display_name text, p_consent_basis text,
+                                             p_recipient_participates boolean default false,
+                                             p_household uuid default null)
 returns uuid language plpgsql security definer set search_path = public
 as $$
-declare v_user uuid := (select auth.uid()); v_circle uuid;
+declare v_user uuid := (select auth.uid()); v_circle uuid; v_household uuid := p_household;
 begin
   if v_user is null then raise exception 'not authenticated'; end if;
-  insert into public.circles (name, created_by, consent_basis, consent_recorded_by)
-    values (p_name, v_user, p_consent_basis, v_user) returning id into v_circle;
+  if v_household is not null and not exists (
+       select 1 from public.circles c join public.circle_members m on m.circle_id = c.id
+       where c.household_id = v_household and m.user_id = v_user and m.role = 'owner' and m.status = 'active')
+  then raise exception 'not the host of a circle in that household'; end if;
+  insert into public.circles (name, created_by, consent_basis, consent_recorded_by, household_id)
+    values (p_name, v_user, p_consent_basis, v_user, v_household) returning id into v_circle;
   insert into public.circle_members (circle_id, user_id, role) values (v_circle, v_user, 'owner');
-  insert into public.circle_settings (circle_id) values (v_circle);
+  insert into public.circle_settings (circle_id, recipient_participates) values (v_circle, p_recipient_participates);
   insert into public.recipient_profile (circle_id, display_name) values (v_circle, p_recipient_display_name);
   return v_circle;
 end $$;
-grant execute on function app.create_circle(text, text, text) to authenticated;
+grant execute on function app.create_circle(text, text, text, boolean, uuid) to authenticated;
+
+-- Link two circles the caller hosts into one household (creating it if neither has one). Grants no access.
+create or replace function app.link_circles(p_circle_a uuid, p_circle_b uuid)
+returns uuid language plpgsql security definer set search_path = public
+as $$
+declare v_household uuid;
+begin
+  if not (app.has_role(p_circle_a, 'owner') and app.has_role(p_circle_b, 'owner')) then
+    raise exception 'must host both circles'; end if;
+  select coalesce(a.household_id, b.household_id) into v_household
+    from public.circles a, public.circles b where a.id = p_circle_a and b.id = p_circle_b;
+  if v_household is null then
+    insert into public.households (created_by) values ((select auth.uid())) returning id into v_household;
+  end if;
+  update public.circles set household_id = v_household where id in (p_circle_a, p_circle_b);
+  return v_household;
+end $$;
+grant execute on function app.link_circles(uuid, uuid) to authenticated;
+
+-- households: visible to members of any circle in the household; the circles list itself is still per-membership.
+create policy households_select on public.households for select to authenticated
+  using (exists (select 1 from public.circles c where c.household_id = households.id and app.is_member(c.id)));
+create policy households_update on public.households for update to authenticated
+  using (exists (select 1 from public.circles c where c.household_id = households.id and app.has_role(c.id, 'owner')));
+-- inserts happen inside app.create_circle() / app.link_circles() (security definer).
+
+-- circle_settings: every member reads the toggles (the app renders navigation from them); only the host changes them.
+create policy settings_select on public.circle_settings for select to authenticated using (app.is_member(circle_id));
+create policy settings_update on public.circle_settings for update to authenticated
+  using (app.has_role(circle_id, 'owner')) with check (app.has_role(circle_id, 'owner'));
 
 -- circle_members
 create policy members_select on public.circle_members for select to authenticated
@@ -426,7 +485,9 @@ create policy invites_select on public.invites for select to authenticated
 create policy invites_insert on public.invites for insert to authenticated
   with check (invited_by = (select auth.uid()) and (
     app.has_role(circle_id, 'owner')
-    or (app.has_role(circle_id, 'full') and role in ('viewer','aide','recipient','friend'))));
+    or (app.has_role(circle_id, 'full') and app.recipient_can_see(circle_id, 'full_members_can_invite')
+        and role in ('viewer','aide','recipient','friend'))));
+-- (recipient_can_see is a generic "read this boolean setting" helper despite its name; Phase 1 may rename it app.setting_on.)
 create policy invites_update on public.invites for update to authenticated
   using (app.has_role(circle_id, 'owner','full'));
 
@@ -493,7 +554,22 @@ create policy expenses_write on public.expenses for insert to authenticated
 create policy expenses_update on public.expenses for update to authenticated
   using (app.has_role(circle_id, 'owner','full') and app.circle_is_plus(circle_id));
 create policy expenses_delete on public.expenses for delete to authenticated using (app.has_role(circle_id, 'owner','full'));
--- expense_splits and settlements: same shape as expenses (select = team; write = owner/full + plus).
+create policy splits_select on public.expense_splits for select to authenticated
+  using (app.has_role(circle_id, 'owner','full','viewer')
+      or (app.has_role(circle_id, 'recipient') and app.recipient_can_see(circle_id, 'recipient_sees_expenses')));
+create policy splits_write on public.expense_splits for insert to authenticated
+  with check (app.has_role(circle_id, 'owner','full') and app.circle_is_plus(circle_id));
+create policy splits_update on public.expense_splits for update to authenticated
+  using (app.has_role(circle_id, 'owner','full') and app.circle_is_plus(circle_id));
+create policy splits_delete on public.expense_splits for delete to authenticated using (app.has_role(circle_id, 'owner','full'));
+-- Trigger (Phase 5): splits must sum to expenses.amount_cents; split.circle_id must equal the expense's circle_id.
+
+create policy settlements_select on public.settlements for select to authenticated
+  using (app.has_role(circle_id, 'owner','full','viewer')
+      or (app.has_role(circle_id, 'recipient') and app.recipient_can_see(circle_id, 'recipient_sees_expenses')));
+create policy settlements_insert on public.settlements for insert to authenticated
+  with check (app.has_role(circle_id, 'owner','full') and app.circle_is_plus(circle_id) and created_by = (select auth.uid()));
+create policy settlements_delete on public.settlements for delete to authenticated using (app.has_role(circle_id, 'owner','full'));
 
 -- documents (Phase 4): writes require Plus; reads never gated
 create policy documents_select on public.documents for select to authenticated
